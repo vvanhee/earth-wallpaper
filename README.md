@@ -496,34 +496,4 @@ MIT — see [LICENSE](LICENSE).
 Image assets are NASA public-domain works and are not covered by the MIT
 licence. See [Image Attribution](#image-attribution) above.
 
----
 
-## Submitting to the Lively Community
-
-There is no official Lively marketplace — the community distributes wallpapers
-through GitHub and the Lively Discussions forum.
-
-### Step 1 — Host the code on GitHub
-
-Push this repository to a public GitHub repo.  
-Update the `Contact` URL in `LivelyInfo.json` to your actual repository URL.
-
-### Step 2 — Export a shareable `.zip`
-
-In Lively, right-click the wallpaper thumbnail → **Export Wallpaper**. This
-creates a self-contained `.zip` archive (Lively's `.lwp` format is just a
-renamed zip). Upload it as a GitHub Release asset.
-
-### Step 3 — Post in Lively Discussions
-
-Open a new discussion in the
-[Show and tell](https://github.com/rocksdanister/lively/discussions/categories/show-and-tell)
-category:
-
-- Include a screenshot or screen-recording GIF as a preview
-- Link to your GitHub repo and/or the `.zip` release
-- Briefly describe features and customisation options
-
-That is the standard way community wallpapers are discovered and shared.
-There is no pull-request or review pipeline for wallpaper content itself —
-the Lively repository only accepts contributions to the application code.
