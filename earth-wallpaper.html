@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Earth</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  #loading {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; background: #000;
+    color: #7aa8ff; font-family: 'Helvetica Neue', sans-serif;
+    font-size: 13px; letter-spacing: 0.15em; text-transform: uppercase;
+    gap: 16px; z-index: 10; transition: opacity 1s ease;
+  }
+  #loading-bar-wrap { width: 180px; height: 2px; background: rgba(100,150,255,0.15); border-radius: 2px; }
+  #loading-bar { height: 100%; width: 0%; background: #7aa8ff; border-radius: 2px; transition: width 0.3s ease; }
+</style>
+</head>
+<body>
+<div id="loading">
+  <div>Loading Earth</div>
+  <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 1000);
+camera.position.z = 3.8;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.7;
+document.body.appendChild(renderer.domElement);
+
+const SUN_DIR = new THREE.Vector3(18.0, 0.8, 1.5).normalize();
+
+// ─── Realistic Star Field ─────────────────────────────────────────────────────
+// Per-star color temperatures, power-law brightness, atmospheric scintillation,
+// slow dome rotation + individual drift so the field looks different after ~10 min.
+
+const starVert = `
+  uniform float uTime;
+  attribute float aSize;
+  attribute float aPhase;
+  attribute float aSpeed;
+  varying float vOpacity;
+  varying vec3  vStarColor;
+
+  void main() {
+    vStarColor = color;
+
+    // ── Slow dome rotation (full 360° in ~2 hours) ────────────────────────
+    // Makes the star field visibly shift over 10 minutes (~30° of arc).
+    float domeAngle = uTime * 0.000873;
+    float cd = cos(domeAngle), sd = sin(domeAngle);
+    vec3 p = vec3(
+      cd * position.x + sd * position.z,
+      position.y,
+      -sd * position.x + cd * position.z
+    );
+
+    // ── Individual star drift ─────────────────────────────────────────────
+    // Each star oscillates with a unique slow period (5–15 min half-cycle),
+    // so the field composition changes noticeably over ~10 minutes.
+    float drift  = sin(uTime * 0.00058 * aSpeed + aPhase) * 2.2;
+    float driftB = cos(uTime * 0.00041 * aSpeed + aPhase * 1.37) * 1.6;
+    p.x += sin(aPhase * 2.11) * drift;
+    p.y += cos(aPhase * 1.73) * drift;
+    p.z += sin(aPhase * 3.19) * driftB;
+
+    // ── Atmospheric scintillation (twinkle) ───────────────────────────────
+    // Two incommensurate sine waves to avoid periodic repetition.
+    float scint = 0.52
+      + 0.28 * sin(uTime * (1.8 + aSpeed * 0.9)  + aPhase)
+      + 0.20 * sin(uTime * (3.5 + aSpeed * 1.6)  + aPhase * 2.47);
+    scint = clamp(scint, 0.0, 1.0);
+    vOpacity = scint;
+
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_Position  = projectionMatrix * mv;
+    // sizeAttenuation — larger closer to camera
+    gl_PointSize = aSize * (240.0 / -mv.z) * (0.75 + 0.25 * scint);
+  }
+`;
+
+const starFrag = `
+  varying float vOpacity;
+  varying vec3  vStarColor;
+
+  void main() {
+    vec2  uv = gl_PointCoord - 0.5;
+    float r2 = dot(uv, uv);
+    if (r2 > 0.25) discard;
+
+    // Tight Gaussian core + diffuse halo → realistic Airy-disk look
+    float core = exp(-r2 * 22.0);
+    float halo = exp(-r2 *  5.0) * 0.28;
+    float alpha = (core + halo) * vOpacity;
+
+    gl_FragColor = vec4(vStarColor, alpha);
+  }
+`;
+
+function buildStarField() {
+  // Stellar color-temperature palette with realistic frequency weights.
+  // Spectral classes: O/B rare blue giants → M abundant red dwarfs.
+  const palette = [
+    { rgb: [0.55, 0.65, 1.00], w: 0.03 }, // O-B  blue-white
+    { rgb: [0.75, 0.86, 1.00], w: 0.07 }, // A    Vega/Sirius white-blue
+    { rgb: [0.97, 0.98, 1.00], w: 0.13 }, // F    near-white
+    { rgb: [1.00, 0.98, 0.88], w: 0.19 }, // G    sun-yellow
+    { rgb: [1.00, 0.91, 0.68], w: 0.24 }, // K    warm orange
+    { rgb: [1.00, 0.74, 0.46], w: 0.20 }, // M    orange-red
+    { rgb: [1.00, 0.54, 0.33], w: 0.14 }, // M/C  deep red-orange
+  ];
+  let cum = 0;
+  palette.forEach(c => { c.cum = (cum += c.w); });
+
+  function pickColor() {
+    const r = Math.random();
+    for (const c of palette) if (r < c.cum) return c.rgb;
+    return palette[palette.length - 1].rgb;
+  }
+
+  const N = 15000;
+  const pos    = new Float32Array(N * 3);
+  const col    = new Float32Array(N * 3);
+  const sizes  = new Float32Array(N);
+  const phases = new Float32Array(N);
+  const speeds = new Float32Array(N);
+
+  for (let i = 0; i < N; i++) {
+    // Uniform spherical distribution
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const R     = 155 + Math.random() * 45;
+    pos[i*3]   = R * Math.sin(phi) * Math.cos(theta);
+    pos[i*3+1] = R * Math.sin(phi) * Math.sin(theta);
+    pos[i*3+2] = R * Math.cos(phi);
+
+    // Power-law brightness: most stars tiny, a few large & bright (Salpeter IMF)
+    const br = Math.pow(Math.random(), 3.8);
+    sizes[i] = 0.11 + br * 3.4;
+
+    const c = pickColor();
+    col[i*3]   = c[0];
+    col[i*3+1] = c[1];
+    col[i*3+2] = c[2];
+
+    phases[i] = Math.random() * Math.PI * 2;
+    speeds[i] = 0.35 + Math.random() * 1.65;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,    3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(col,    3));
+  geo.setAttribute('aSize',    new THREE.BufferAttribute(sizes,  1));
+  geo.setAttribute('aPhase',   new THREE.BufferAttribute(phases, 1));
+  geo.setAttribute('aSpeed',   new THREE.BufferAttribute(speeds, 1));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms:       { uTime: { value: 0 } },
+    vertexShader:   starVert,
+    fragmentShader: starFrag,
+    transparent:    true,
+    depthWrite:     false,
+    vertexColors:   true,
+  });
+
+  return { mesh: new THREE.Points(geo, mat), mat };
+}
+
+const stars = buildStarField();
+scene.add(stars.mesh);
+
+// ─── Earth shader ─────────────────────────────────────────────────────────────
+const earthVert = `
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vUv       = uv;
+    vNormal   = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const earthFrag = `
+  precision highp float;
+
+  uniform sampler2D uDay;
+  uniform sampler2D uNight;
+  uniform sampler2D uWater;
+  uniform sampler2D uTopo;
+  uniform vec3 uSunDir;
+  uniform vec3 uCamPos;
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3  N     = normalize(vNormal);
+    vec3  V     = normalize(uCamPos - vWorldPos);
+    vec3  L     = normalize(uSunDir);
+
+    float NdotL = dot(N, L);
+    float NdotV = max(dot(N, V), 0.0);
+
+    // ── Day texture + water mask (sampled early so both can use it) ─────────
+    vec3  day      = pow(texture2D(uDay, vUv).rgb, vec3(2.2));
+    float waterMask = texture2D(uWater, vUv).r;
+
+    // ── Sunny glow on LAND only (not ocean, not clouds) ──────────────────────
+    float luma     = dot(day, vec3(0.299, 0.587, 0.114));
+    float nonCloud = (1.0 - smoothstep(0.30, 0.65, luma)) * (1.0 - waterMask);
+    float sunFacing = max(dot(normalize(vNormal), normalize(uSunDir)), 0.0);
+    vec3  sunGlow  = vec3(1.00, 0.82, 0.42) * nonCloud * sunFacing * 0.55;
+    // Warm-tint land and slightly lift saturation toward golden
+    day = day * (1.0 + sunGlow) + sunGlow * 0.18;
+
+    // ── Topo-based bump (screen-space derivatives give a subtle 3-D relief) ─
+    float topo = texture2D(uTopo, vUv).r;
+    float tx   = dFdx(topo);
+    float ty   = dFdy(topo);
+    // Perturb shading normal slightly in screen tangent directions
+    vec3  bN   = normalize(N + vec3(tx, ty, 0.0) * 2.5);
+
+    float NdotL_b = dot(bN, L);   // bump-aware diffuse
+    float diffuse = max(NdotL_b, 0.0) * 1.6 + 0.01;
+    float ao      = mix(0.72, 1.0, topo);  // stronger AO for more depth
+
+    // ── Night lights (30% darker than v4: factor 0.49 vs previous 0.70) ────
+    vec3  nightTex   = pow(texture2D(uNight, vUv).rgb, vec3(2.2));
+    float nightBlend = smoothstep(0.05, -0.07, NdotL);
+    vec3  night      = nightTex * nightTex * nightBlend * 6.0;
+
+    // ── Day-night blend ──────────────────────────────────────────────────────
+    float dayBlend = smoothstep(-0.03, 0.07, NdotL);
+
+    // ── Realistic ocean ──────────────────────────────────────────────────────
+    vec3  H        = normalize(L + V);
+
+    // Schlick Fresnel — controls how reflective ocean is at grazing angles
+    float cosTheta = max(dot(N, V), 0.0);
+    float fresnel  = 0.02 + 0.98 * pow(1.0 - cosTheta, 5.0);
+
+    // Deep ocean base color; preserve the original texture's subtle hue variation
+    // by blending it with a rich navy, pushing blue up and suppressing red/green
+    vec3  deepNavy   = vec3(0.005, 0.030, 0.130);
+    vec3  texOcean   = clamp(day * vec3(0.20, 0.55, 1.80), 0.0, 1.0); // re-tint
+    // Shallow coastal pixels have higher luma in the satellite texture
+    float shallowness = smoothstep(0.04, 0.18, luma);
+    vec3  shallowTeal = vec3(0.03, 0.22, 0.50);
+    vec3  oceanColor  = mix(deepNavy, mix(texOcean, shallowTeal, 0.55), shallowness);
+
+    // Sky diffuse reflection — blue atmosphere scatters across the whole lit ocean
+    vec3  skyBlue  = vec3(0.18, 0.46, 0.90);
+    oceanColor    += skyBlue * 0.10 * sunFacing * dayBlend;
+
+    // Fresnel reflection of the sky at glancing angles (limb brightening)
+    oceanColor     = mix(oceanColor, skyBlue * 0.75, fresnel * 0.55 * sunFacing);
+
+    // Replace day texture on water pixels with the computed ocean color
+    day = mix(day, oceanColor, waterMask * dayBlend);
+
+    // Sun glint: broad shimmering oval (low shininess) + tight specular point
+    float litFactor  = clamp(NdotL * 10.0, 0.0, 1.0);
+    float NdotH      = max(dot(bN, H), 0.0);
+    float broadGlint = pow(NdotH, 40.0)  * 0.55;   // large oval patch
+    float tightGlint = pow(NdotH, 380.0) * 5.0;    // bright central spot
+    vec3  specColor  = vec3(0.92, 0.96, 1.00) * (broadGlint + tightGlint)
+                       * waterMask * litFactor;
+
+    // ── Saturation boost (land + ocean) ──────────────────────────────────────
+    float dayLuma2  = dot(day, vec3(0.299, 0.587, 0.114));
+    day = mix(vec3(dayLuma2), day, 1.45);
+
+    vec3 colour = day * diffuse * ao * dayBlend + night + specColor;
+
+    // Reinhard tone-map + gamma
+    colour = colour / (colour + vec3(0.85));
+    colour = pow(colour, vec3(1.0 / 2.2));
+
+    gl_FragColor = vec4(colour, 1.0);
+  }
+`;
+
+// ─── Atmospheric glow (makes Earth look unmistakably 3-D) ────────────────────
+const atmosVert = `
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vNormal   = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const atmosFrag = `
+  precision highp float;
+  uniform vec3 uSunDir;
+  uniform vec3 uCamPos;
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+
+  void main() {
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uCamPos - vWorldPos);
+    vec3 L = normalize(uSunDir);
+
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = dot(N, L);
+
+    // Tighter fresnel — hugs the limb, barely visible face-on
+    float fresnel = pow(1.0 - NdotV, 5.5);
+
+    // Day/night atmosphere colour
+    float dayFactor  = smoothstep(-0.20, 0.35, NdotL);
+    float duskFactor = 1.0 - abs(NdotL * 2.2 - 0.2);
+    duskFactor = clamp(duskFactor, 0.0, 1.0) * smoothstep(-0.1, 0.1, NdotL);
+
+    vec3 dayColor   = vec3(0.16, 0.46, 1.00);
+    vec3 duskColor  = vec3(0.70, 0.35, 0.10);
+    vec3 nightColor = vec3(0.02, 0.04, 0.12);
+
+    vec3 atmosColor = mix(nightColor, dayColor, dayFactor);
+    atmosColor      = mix(atmosColor, duskColor, duskFactor * 0.55);
+
+    // Thin halo — not a bubble
+    float alpha = fresnel * (0.38 + 0.62 * dayFactor) * 0.28;
+
+    gl_FragColor = vec4(atmosColor, alpha);
+  }
+`;
+
+// ─── Procedural cloud shader (unchanged from v4) ──────────────────────────────
+const cloudVert = `
+  varying vec3 vNormal;
+  varying vec3 vWorldPos;
+  void main() {
+    vNormal   = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const cloudFrag = `
+  precision highp float;
+  uniform vec3  uSunDir;
+  uniform vec3  uCamPos;
+  uniform float uTime;
+  varying vec3  vNormal;
+  varying vec3  vWorldPos;
+
+  float hash(vec3 p) {
+    p  = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float vnoise(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    return mix(
+      mix(mix(hash(i),             hash(i+vec3(1,0,0)), f.x),
+          mix(hash(i+vec3(0,1,0)), hash(i+vec3(1,1,0)), f.x), f.y),
+      mix(mix(hash(i+vec3(0,0,1)), hash(i+vec3(1,0,1)), f.x),
+          mix(hash(i+vec3(0,1,1)), hash(i+vec3(1,1,1)), f.x), f.y), f.z);
+  }
+  float fbm4(vec3 p) {
+    float v = 0.0, a = 0.5;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p);
+    return v;
+  }
+  float fbm6(vec3 p) {
+    float v = 0.0, a = 0.5;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p); p *= 2.13; a *= 0.50;
+    v += a*vnoise(p);
+    return v;
+  }
+
+  void main() {
+    vec3 sp = normalize(vWorldPos);
+    float drift = uTime * 0.022;
+    float cd = cos(drift), sd = sin(drift);
+    vec3 p = vec3(cd*sp.x - sd*sp.z, sp.y, sd*sp.x + cd*sp.z);
+    p += vec3(uTime * 0.0040, uTime * 0.0025, uTime * 0.0018);
+    vec3 p0 = p * 2.6;
+
+    vec3 q = vec3(
+      fbm4(p0                          ) - 0.47,
+      fbm4(p0 + vec3(5.20, 1.70, 3.30)) - 0.47,
+      fbm4(p0 + vec3(2.40, 6.10, 4.70)) - 0.47
+    );
+    vec3 r = vec3(
+      fbm4(p0 + 1.5*q + vec3(1.70, 9.20, 5.10)) - 0.47,
+      fbm4(p0 + 1.5*q + vec3(8.30, 2.80, 7.40)) - 0.47,
+      fbm4(p0 + 1.5*q + vec3(4.10, 5.30, 2.90)) - 0.47
+    );
+
+    // Slow synoptic-scale cloud system evolution (frontal passages, ~hours)
+    float t1 = uTime * 0.00072, t2 = uTime * 0.00055;
+    vec3 tVar = vec3(sin(t1) * 0.38, cos(t2 * 0.73) * 0.26, sin(t2 + 1.57) * 0.38);
+    float density = fbm6(p0 * 1.25 + (r + tVar) * 1.1 + vec3(3.30, 2.10, 7.70));
+
+    // Large-scale pressure-system coverage variation
+    vec3 slowP = p * 1.3 + vec3(uTime * 0.00090, 0.0, uTime * 0.00065);
+    density += (fbm4(slowP) - 0.50) * 0.10;
+
+    float absLat = abs(sp.y);
+    // ITCZ: deep convection near equator (±10°, sp.y ≈ 0–0.17)
+    float itcz    = (1.0 - smoothstep(0.0, 0.17, absLat)) * 0.22;
+    // Subtropical dry zones: Hadley cell subsidence (~18–35°, sp.y ≈ 0.28–0.65)
+    float subtrop = smoothstep(0.28, 0.46, absLat) * (1.0 - smoothstep(0.52, 0.65, absLat));
+    // Mid-latitude storm tracks: Ferrel cell cyclones (~45–65°, sp.y ≈ 0.63–0.88)
+    float midLat  = smoothstep(0.63, 0.77, absLat) * (1.0 - smoothstep(0.88, 0.97, absLat)) * 0.20;
+    density *= (1.0 - 0.52 * subtrop) + itcz + midLat;
+
+    float cAlpha = smoothstep(0.46, 0.70, density);
+    cAlpha = pow(cAlpha, 1.35);
+
+    vec3  N     = normalize(vNormal);
+    vec3  L     = normalize(uSunDir);
+    float NdotL = dot(N, L);
+    float diffuse = max(NdotL, 0.0) * 0.88 + 0.12;
+
+    vec3  V     = normalize(uCamPos - vWorldPos);
+    float vdotL = dot(-V, L);
+    float scatter = pow(max(vdotL, 0.0), 7.0) * 0.50;
+
+    vec3 litColor    = vec3(1.00, 0.99, 0.97);
+    vec3 shadowColor = vec3(0.68, 0.73, 0.80);
+    vec3 dayColor    = mix(shadowColor, litColor, diffuse);
+    dayColor        += vec3(0.98, 0.96, 0.88) * scatter * (1.0 - diffuse * 0.5);
+
+    vec3 nightColor  = vec3(0.04, 0.045, 0.06);
+    float dayFactor  = smoothstep(-0.12, 0.12, NdotL);
+    vec3 cloudColor  = mix(nightColor, dayColor, dayFactor);
+
+    gl_FragColor = vec4(cloudColor, cAlpha * 0.94);
+  }
+`;
+
+// ─── Texture loading (tries NASA high-res first, falls back to three-globe) ───
+// NASA Blue Marble 2048 × 1024 → crisp, detailed, with ocean bathymetry colours.
+const NASA   = 'https://eoimages.gsfc.nasa.gov/images/imagerecords/73000/73909';
+const BASE   = 'https://unpkg.com/three-globe@2.31.0/example/img';
+const loader = new THREE.TextureLoader();
+loader.crossOrigin = 'anonymous';
+
+let loaded = 0;
+const total = 4;
+const bar       = document.getElementById('loading-bar');
+const loadingEl = document.getElementById('loading');
+
+function onProgress() {
+  loaded++;
+  bar.style.width = `${(loaded / total) * 100}%`;
+  if (loaded === total) {
+    setTimeout(() => {
+      loadingEl.style.opacity = '0';
+      setTimeout(() => loadingEl.remove(), 1000);
+    }, 400);
+  }
+}
+
+function loadTex(urls, encoding) {
+  const arr = Array.isArray(urls) ? urls : [urls];
+  return new Promise(resolve => {
+    let idx = 0;
+    function tryNext() {
+      if (idx >= arr.length) { onProgress(); resolve(null); return; }
+      loader.load(arr[idx++], t => {
+        if (encoding) t.encoding = encoding;
+        onProgress();
+        resolve(t);
+      }, undefined, tryNext);
+    }
+    tryNext();
+  });
+}
+
+async function build() {
+  const [dayMap, nightMap, waterMap, topoMap] = await Promise.all([
+    // NASA high-res (2048×1024 topo+bathy) → fallback to three-globe
+    loadTex(
+      [`./world.topo.bathy.200401.3x5400x2700.png`, `${BASE}/earth-day.jpg`],
+      THREE.sRGBEncoding
+    ),
+    // NASA Black Marble — pure city lights, no cloud overlay.
+    // Three URLs tried in order; falls back to three-globe composite if all fail.
+    loadTex([
+      './BlackMarble_2016_3km.jpg',
+      'https://eoimages.gsfc.nasa.gov/images/imagerecords/55000/55167/earth_lights_lrg.jpg',
+      `${BASE}/earth-night.jpg`,
+    ], THREE.sRGBEncoding),
+    loadTex(`${BASE}/earth-water.png`),
+    loadTex(`${BASE}/earth-topology.png`),
+  ]);
+
+  const earthMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uDay:    { value: dayMap   },
+      uNight:  { value: nightMap },
+      uWater:  { value: waterMap },
+      uTopo:   { value: topoMap  },
+      uSunDir: { value: SUN_DIR  },
+      uCamPos: { value: camera.position },
+    },
+    vertexShader: earthVert, fragmentShader: earthFrag,
+  });
+
+  const earthMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 256, 128),   // higher poly for smoother silhouette
+    earthMat
+  );
+
+  const cloudMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uSunDir: { value: SUN_DIR         },
+      uCamPos: { value: camera.position },
+      uTime:   { value: 0.0             },
+    },
+    vertexShader:   cloudVert,
+    fragmentShader: cloudFrag,
+    transparent: true,
+    depthWrite:  false,
+  });
+  const cloudMesh = new THREE.Mesh(new THREE.SphereGeometry(1.008, 128, 64), cloudMat);
+
+  // ── Atmosphere shell — single thin pass, front-face only ─────────────────
+  const atmosMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uSunDir: { value: SUN_DIR         },
+      uCamPos: { value: camera.position },
+    },
+    vertexShader:   atmosVert,
+    fragmentShader: atmosFrag,
+    transparent:    true,
+    depthWrite:     false,
+    side:           THREE.FrontSide,
+    blending:       THREE.AdditiveBlending,
+  });
+  // 1.018 = ~18 km equivalent altitude — razor-thin halo at the limb
+  const atmosMesh = new THREE.Mesh(new THREE.SphereGeometry(1.018, 128, 64), atmosMat);
+
+  const earthGroup = new THREE.Group();
+  earthGroup.rotation.x = 23.5 * Math.PI / 180;
+  earthGroup.add(earthMesh);
+  earthGroup.add(cloudMesh);
+  earthGroup.add(atmosMesh);   // thin rim halo on top
+  scene.add(earthGroup);
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const t = performance.now() * 0.001;
+    earthMesh.rotation.y   = t * 0.0375;
+    cloudMat.uniforms.uTime.value  = t;
+    stars.mat.uniforms.uTime.value = t;
+    renderer.render(scene, camera);
+  }
+  animate();
+}
+
+build();
+
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
