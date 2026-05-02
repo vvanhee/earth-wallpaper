@@ -1,5 +1,7 @@
 # Earth — Lively Wallpaper
 
+![Earth Wallpaper Preview](bnlernm3.g0c.gif)
+
 A photorealistic, real-time 3-D Earth rendered entirely in the browser using
 [Three.js](https://threejs.org/) and custom GLSL shaders. Designed for use as
 an animated desktop wallpaper in [Lively Wallpaper](https://rocksdanister.com/lively/).
