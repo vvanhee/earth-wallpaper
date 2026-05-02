@@ -1,0 +1,140 @@
+{
+  "earthLabel": {
+    "type": "label",
+    "value": "── Earth ──────────────────────────"
+  },
+  "earthRotSpeed": {
+    "type": "slider",
+    "text": "Rotation Speed",
+    "min": 0,
+    "max": 4,
+    "step": 0.05,
+    "value": 1,
+    "help": "Earth spin speed multiplier. 0 = paused, 1 = default, 2 = double speed."
+  },
+
+  "sunLabel": {
+    "type": "label",
+    "value": "── Sun ─────────────────────────────"
+  },
+  "sunAzimuth": {
+    "type": "slider",
+    "text": "Sun Azimuth",
+    "min": 0,
+    "max": 360,
+    "step": 1,
+    "value": 5,
+    "help": "Horizontal angle of the sun (0–360°). Controls where day/night terminator falls."
+  },
+  "sunElevation": {
+    "type": "slider",
+    "text": "Sun Elevation",
+    "min": -90,
+    "max": 90,
+    "step": 1,
+    "value": 2,
+    "help": "Vertical angle of the sun (-90 to 90°). Negative = below horizon (all night)."
+  },
+
+  "cloudLabel": {
+    "type": "label",
+    "value": "── Clouds ──────────────────────────"
+  },
+  "cloudRotSpeed": {
+    "type": "slider",
+    "text": "Cloud Drift Speed",
+    "min": 0,
+    "max": 4,
+    "step": 0.05,
+    "value": 1,
+    "help": "Cloud rotation speed multiplier. 0 = frozen, 1 = default, 2 = double speed."
+  },
+  "cloudCoverage": {
+    "type": "slider",
+    "text": "Cloud Coverage",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 50,
+    "help": "Overall cloud amount. Higher = more sky covered. 50 = default."
+  },
+  "cloudSharpness": {
+    "type": "slider",
+    "text": "Cloud Edge Sharpness",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 50,
+    "help": "How crisp cloud edges appear. Higher = sharper, lower = softer/more diffuse."
+  },
+  "cloudOpacity": {
+    "type": "slider",
+    "text": "Cloud Opacity",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 94,
+    "help": "Maximum cloud transparency. Lower = more see-through clouds."
+  },
+
+  "oceanLabel": {
+    "type": "label",
+    "value": "── Ocean ───────────────────────────"
+  },
+  "oceanBlueBoost": {
+    "type": "slider",
+    "text": "Ocean Blue Intensity",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 50,
+    "help": "Blue channel multiplier for the whole ocean. 50 = neutral, 100 = 2× vivid blue, 0 = grey."
+  },
+  "oceanDepth": {
+    "type": "slider",
+    "text": "Ocean Depth Visibility",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 35,
+    "help": "Reveals bathymetric texture detail. Deep trenches darken, continental shelves stay bright. 0 = flat uniform ocean, 100 = full depth contrast from satellite texture."
+  },
+
+  "renderLabel": {
+    "type": "label",
+    "value": "── Rendering ───────────────────────"
+  },
+  "exposure": {
+    "type": "slider",
+    "text": "Exposure / Brightness",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 48,
+    "help": "Tone mapping exposure. Higher = brighter overall image. 48 = default (1.70×)."
+  },
+  "nightIntensity": {
+    "type": "slider",
+    "text": "Night Lights Intensity",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 40,
+    "help": "Brightness of city lights on the dark side of Earth. 40 = default."
+  },
+  "atmosIntensity": {
+    "type": "slider",
+    "text": "Atmosphere Glow",
+    "min": 0,
+    "max": 100,
+    "step": 1,
+    "value": 14,
+    "help": "Intensity of the blue atmospheric limb halo. 14 = default. 0 = no glow, 100 = very bright."
+  },
+  "fps30": {
+    "type": "checkbox",
+    "text": "Lock to 30 FPS",
+    "value": false,
+    "help": "Cap animation at 30 frames per second to reduce GPU load."
+  }
+}

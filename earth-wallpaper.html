@@ -198,8 +198,12 @@ const earthFrag = `
   uniform sampler2D uNight;
   uniform sampler2D uWater;
   uniform sampler2D uTopo;
-  uniform vec3 uSunDir;
-  uniform vec3 uCamPos;
+  uniform vec3  uSunDir;
+  uniform vec3  uCamPos;
+  uniform float uOceanBlueBoost;
+  uniform float uNightIntensity;
+  uniform float uExposure;
+  uniform float uOceanDepth;
   varying vec2 vUv;
   varying vec3 vNormal;
   varying vec3 vWorldPos;
@@ -238,7 +242,7 @@ const earthFrag = `
     // ── Night lights (30% darker than v4: factor 0.49 vs previous 0.70) ────
     vec3  nightTex   = pow(texture2D(uNight, vUv).rgb, vec3(2.2));
     float nightBlend = smoothstep(0.05, -0.07, NdotL);
-    vec3  night      = nightTex * nightTex * nightBlend * 6.0;
+    vec3  night      = nightTex * nightTex * nightBlend * uNightIntensity;
 
     // ── Day-night blend ──────────────────────────────────────────────────────
     float dayBlend = smoothstep(-0.03, 0.07, NdotL);
@@ -266,6 +270,15 @@ const earthFrag = `
     // Fresnel reflection of the sky at glancing angles (limb brightening)
     oceanColor     = mix(oceanColor, skyBlue * 0.75, fresnel * 0.55 * sunFacing);
 
+    // Ocean blue boost — applied to the whole ocean (deep + shallow)
+    oceanColor.b   = clamp(oceanColor.b * uOceanBlueBoost, 0.0, 1.0);
+
+    // Bathymetric depth: modulate ocean brightness by source-texture luma.
+    // Deep trenches are darker in the satellite texture → appear as darker ocean.
+    // At uOceanDepth=0 (default) there is no effect.
+    float bathyMod = mix(1.0, clamp(luma * 30.0 + 0.10, 0.08, 1.50), uOceanDepth);
+    oceanColor    *= bathyMod;
+
     // Replace day texture on water pixels with the computed ocean color
     day = mix(day, oceanColor, waterMask * dayBlend);
 
@@ -284,6 +297,7 @@ const earthFrag = `
     vec3 colour = day * diffuse * ao * dayBlend + night + specColor;
 
     // Reinhard tone-map + gamma
+    colour *= uExposure;
     colour = colour / (colour + vec3(0.85));
     colour = pow(colour, vec3(1.0 / 2.2));
 
@@ -304,8 +318,9 @@ const atmosVert = `
 
 const atmosFrag = `
   precision highp float;
-  uniform vec3 uSunDir;
-  uniform vec3 uCamPos;
+  uniform vec3  uSunDir;
+  uniform vec3  uCamPos;
+  uniform float uAtmosIntensity;
   varying vec3 vNormal;
   varying vec3 vWorldPos;
 
@@ -333,7 +348,7 @@ const atmosFrag = `
     atmosColor      = mix(atmosColor, duskColor, duskFactor * 0.55);
 
     // Thin halo — not a bubble
-    float alpha = fresnel * (0.38 + 0.62 * dayFactor) * 0.28;
+    float alpha = fresnel * (0.38 + 0.62 * dayFactor) * uAtmosIntensity;
 
     gl_FragColor = vec4(atmosColor, alpha);
   }
@@ -355,6 +370,10 @@ const cloudFrag = `
   uniform vec3  uSunDir;
   uniform vec3  uCamPos;
   uniform float uTime;
+  uniform float uCloudSpeed;
+  uniform float uCloudCovMin;
+  uniform float uCloudCovMax;
+  uniform float uCloudOpacity;
   varying vec3  vNormal;
   varying vec3  vWorldPos;
 
@@ -393,10 +412,10 @@ const cloudFrag = `
 
   void main() {
     vec3 sp = normalize(vWorldPos);
-    float drift = uTime * 0.022;
+    float drift = uTime * uCloudSpeed;
     float cd = cos(drift), sd = sin(drift);
     vec3 p = vec3(cd*sp.x - sd*sp.z, sp.y, sd*sp.x + cd*sp.z);
-    p += vec3(uTime * 0.0040, uTime * 0.0025, uTime * 0.0018);
+    p += vec3(uTime * 0.0040, uTime * 0.0025, uTime * 0.0018) * uCloudSpeed;
     vec3 p0 = p * 2.6;
 
     vec3 q = vec3(
@@ -428,7 +447,7 @@ const cloudFrag = `
     float midLat  = smoothstep(0.63, 0.77, absLat) * (1.0 - smoothstep(0.88, 0.97, absLat)) * 0.20;
     density *= (1.0 - 0.52 * subtrop) + itcz + midLat;
 
-    float cAlpha = smoothstep(0.46, 0.70, density);
+    float cAlpha = smoothstep(uCloudCovMin, uCloudCovMax, density);
     cAlpha = pow(cAlpha, 1.35);
 
     vec3  N     = normalize(vNormal);
@@ -449,7 +468,7 @@ const cloudFrag = `
     float dayFactor  = smoothstep(-0.12, 0.12, NdotL);
     vec3 cloudColor  = mix(nightColor, dayColor, dayFactor);
 
-    gl_FragColor = vec4(cloudColor, cAlpha * 0.94);
+    gl_FragColor = vec4(cloudColor, cAlpha * uCloudOpacity);
   }
 `;
 
@@ -492,6 +511,96 @@ function loadTex(urls, encoding) {
   });
 }
 
+// ─── Runtime config & Lively Wallpaper property API ──────────────────────────
+const config = {
+  earthRotSpeed: 1.0,    // multiplier; 1 = default
+  cloudRotSpeed: 1.0,    // multiplier; 1 = default
+  cloudCoverage: 50,     // 0-100; 50 = default (maps threshold ~0.46)
+  cloudSharpness: 50,    // 0-100; 50 = default (maps gap ~0.25)
+  cloudOpacity:   94,    // 0-100
+  sunAzimuth:     5,     // degrees 0-360
+  sunElevation:   2,     // degrees -90 to 90
+  oceanBlueBoost: 50,    // 0-100 → 0.0-2.0; 50 → 1.0 (neutral)
+  oceanDepth:     35,    // 0-100 → 0.0-1.0; 35 = default, 0 = off (flat), 100 = full bathymetry
+  exposure:       48,    // 0-100 → 0.5-3.0; 48 → 1.70 default
+  nightIntensity: 40,    // 0-100 → 0-15;    40 → 6.0  default
+  atmosIntensity: 14,    // 0-100 → 0-2.0;   14 → 0.28 default
+  fps30:          false,
+};
+let _earthMesh = null, _earthMat = null, _cloudMat = null, _atmosMat = null;
+let _fpsCap = 0, _lastFrameTime = 0;
+
+function updateSunDir() {
+  const az = config.sunAzimuth   * Math.PI / 180;
+  const el = config.sunElevation * Math.PI / 180;
+  SUN_DIR.set(
+    Math.cos(el) * Math.cos(az),
+    Math.sin(el),
+    Math.cos(el) * Math.sin(az)
+  );
+}
+
+function updateCloudUniforms() {
+  if (!_cloudMat) return;
+  const covMin = 0.66 - (config.cloudCoverage  / 100) * 0.40;
+  const gap    = 0.40 - (config.cloudSharpness  / 100) * 0.30;
+  _cloudMat.uniforms.uCloudSpeed.value   = config.cloudRotSpeed * 0.022;
+  _cloudMat.uniforms.uCloudCovMin.value  = covMin;
+  _cloudMat.uniforms.uCloudCovMax.value  = covMin + gap;
+  _cloudMat.uniforms.uCloudOpacity.value = config.cloudOpacity / 100;
+}
+
+function applyConfig() {
+  updateSunDir();
+  updateCloudUniforms();
+  if (_earthMat) {
+    _earthMat.uniforms.uOceanBlueBoost.value = (config.oceanBlueBoost / 100) * 2.0;
+    _earthMat.uniforms.uNightIntensity.value  = (config.nightIntensity / 100) * 15.0;
+    _earthMat.uniforms.uExposure.value        = 0.5 + (config.exposure / 100) * 2.5;
+    _earthMat.uniforms.uOceanDepth.value      = config.oceanDepth / 100;
+  }
+  if (_atmosMat) {
+    _atmosMat.uniforms.uAtmosIntensity.value = (config.atmosIntensity / 100) * 2.0;
+  }
+  _fpsCap = config.fps30 ? 30 : 0;
+}
+
+function livelyPropertyListener(name, val) {
+  switch (name) {
+    case 'earthRotSpeed':  config.earthRotSpeed  = val; break;
+    case 'cloudRotSpeed':  config.cloudRotSpeed  = val; updateCloudUniforms(); break;
+    case 'cloudCoverage':  config.cloudCoverage  = val; updateCloudUniforms(); break;
+    case 'cloudSharpness': config.cloudSharpness = val; updateCloudUniforms(); break;
+    case 'cloudOpacity':   config.cloudOpacity   = val; updateCloudUniforms(); break;
+    case 'sunAzimuth':     config.sunAzimuth     = val; updateSunDir();        break;
+    case 'sunElevation':   config.sunElevation   = val; updateSunDir();        break;
+    case 'oceanBlueBoost':
+      config.oceanBlueBoost = val;
+      if (_earthMat) _earthMat.uniforms.uOceanBlueBoost.value = (val / 100) * 2.0;
+      break;
+    case 'oceanDepth':
+      config.oceanDepth = val;
+      if (_earthMat) _earthMat.uniforms.uOceanDepth.value = val / 100;
+      break;
+    case 'exposure':
+      config.exposure = val;
+      if (_earthMat) _earthMat.uniforms.uExposure.value = 0.5 + (val / 100) * 2.5;
+      break;
+    case 'nightIntensity':
+      config.nightIntensity = val;
+      if (_earthMat) _earthMat.uniforms.uNightIntensity.value = (val / 100) * 15.0;
+      break;
+    case 'atmosIntensity':
+      config.atmosIntensity = val;
+      if (_atmosMat) _atmosMat.uniforms.uAtmosIntensity.value = (val / 100) * 2.0;
+      break;
+    case 'fps30':
+      config.fps30 = val;
+      _fpsCap = val ? 30 : 0;
+      break;
+  }
+}
+
 async function build() {
   const [dayMap, nightMap, waterMap, topoMap] = await Promise.all([
     // NASA high-res (2048×1024 topo+bathy) → fallback to three-globe
@@ -512,12 +621,16 @@ async function build() {
 
   const earthMat = new THREE.ShaderMaterial({
     uniforms: {
-      uDay:    { value: dayMap   },
-      uNight:  { value: nightMap },
-      uWater:  { value: waterMap },
-      uTopo:   { value: topoMap  },
-      uSunDir: { value: SUN_DIR  },
-      uCamPos: { value: camera.position },
+      uDay:            { value: dayMap            },
+      uNight:          { value: nightMap          },
+      uWater:          { value: waterMap          },
+      uTopo:           { value: topoMap           },
+      uSunDir:         { value: SUN_DIR           },
+      uCamPos:         { value: camera.position   },
+      uOceanBlueBoost: { value: 1.0               },
+      uNightIntensity: { value: 6.0               },
+      uExposure:       { value: 1.7               },
+      uOceanDepth:     { value: 0.0               },
     },
     vertexShader: earthVert, fragmentShader: earthFrag,
   });
@@ -529,9 +642,13 @@ async function build() {
 
   const cloudMat = new THREE.ShaderMaterial({
     uniforms: {
-      uSunDir: { value: SUN_DIR         },
-      uCamPos: { value: camera.position },
-      uTime:   { value: 0.0             },
+      uSunDir:       { value: SUN_DIR         },
+      uCamPos:       { value: camera.position },
+      uTime:         { value: 0.0             },
+      uCloudSpeed:   { value: 0.022           },
+      uCloudCovMin:  { value: 0.46            },
+      uCloudCovMax:  { value: 0.70            },
+      uCloudOpacity: { value: 0.94            },
     },
     vertexShader:   cloudVert,
     fragmentShader: cloudFrag,
@@ -543,8 +660,9 @@ async function build() {
   // ── Atmosphere shell — single thin pass, front-face only ─────────────────
   const atmosMat = new THREE.ShaderMaterial({
     uniforms: {
-      uSunDir: { value: SUN_DIR         },
-      uCamPos: { value: camera.position },
+      uSunDir:         { value: SUN_DIR         },
+      uCamPos:         { value: camera.position },
+      uAtmosIntensity: { value: 0.28            },
     },
     vertexShader:   atmosVert,
     fragmentShader: atmosFrag,
@@ -563,15 +681,23 @@ async function build() {
   earthGroup.add(atmosMesh);   // thin rim halo on top
   scene.add(earthGroup);
 
-  function animate() {
+  _earthMesh = earthMesh;
+  _earthMat  = earthMat;
+  _cloudMat  = cloudMat;
+  _atmosMat  = atmosMat;
+  applyConfig();
+
+  function animate(timestamp) {
     requestAnimationFrame(animate);
+    if (_fpsCap > 0 && timestamp - _lastFrameTime < 1000 / _fpsCap - 1) return;
+    if (_fpsCap > 0) _lastFrameTime = timestamp;
     const t = performance.now() * 0.001;
-    earthMesh.rotation.y   = t * 0.0375;
+    earthMesh.rotation.y   = t * 0.0375 * config.earthRotSpeed;
     cloudMat.uniforms.uTime.value  = t;
     stars.mat.uniforms.uTime.value = t;
     renderer.render(scene, camera);
   }
-  animate();
+  animate(0);
 }
 
 build();
